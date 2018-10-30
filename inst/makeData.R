@@ -60,96 +60,77 @@ records.1h.data = records.1h.data %>%
   dplyr::select(-altitude)
 # build the ML task and do not keep sid as it is not a var
 # devtools::install_github("pokyah/mlr", ref = "gstat")
-library(mlr)
-regr.task = makeRegrTask(id = "1h", data = records.1h.data[-1], target = "tsa")
-# create the learning algo with tuned feature selection
-# Tuning of the percentage of selected filters in the inner loop
-lrn = makeFilterWrapper(learner = "regr.lm", fw.method = "chi.squared")
-ps = makeParamSet(makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))))
-ctrl = makeTuneControlGrid()
-inner = makeResampleDesc("LOO") # ::FIXME:: spatial CV
-lrn = makeTuneWrapper(measures = rmse, lrn, resampling = inner, par.set = ps, control = ctrl, show.info = FALSE)
-
-# Learners
-lrns = list("regr.lm", lrn)
-
-# Outer resampling loop
-outer = makeResampleDesc("LOO")
-res = benchmark(measures = rmse, tasks = regr.task, learners = lrns, resampling = outer, show.info = FALSE)
-
-r = resample(measures = rmse, learner = lrn, task = regr.task, resampling = outer, models = TRUE, show.info = FALSE)
-r$models
-lapply(r$models, function(x) getFilteredFeatures(x$learner.model$next.model))
-res = lapply(r$models, getTuneResult)
-res
-
-
-# https://github.com/mlr-org/mlr/issues/1861
+# https://www.sciencedirect.com/science/article/pii/S2211675315000482
 # https://stackoverflow.com/questions/40527442/r-mlr-wrapper-feature-selection-hyperparameter-tuning-without-nested-nested
-# https://mlr.mlr-org.com/articles/tutorial/nested_resampling.html#example-3-one-task-two-learners-feature-filtering-with-tuning
-
-# tuning of the parameters
-# Feature filtering with tuning in the inner resampling loop
-lrn = makeFilterWrapper(learner = "regr.nnet", fw.method = "chi.squared")
-ps = makeParamSet(
-  makeDiscreteParam("size", values = c(1, 2, 5, 10, 30, 60, 70))
-)
+# https://github.com/mlr-org/mlr/issues/1861
+# https://mlr.mlr-org.com/articles/tutorial/handling_of_spatial_data.html
+# https://www.youtube.com/watch?v=LpOsxBeggM0
+set.seed(2585)
+library(mlr)
+records = records.1h.data[-1]
+coordinates = records %>%
+  dplyr::select(one_of(c("X","Y")))
+records = records %>%
+  dplyr::select(-one_of("X", "Y"))
+regr.task = makeRegrTask(id = "1h", data = records, target = "tsa", coordinates = coordinates)
+# grid search for param tuning
 ctrl = makeTuneControlGrid()
-inner = makeResampleDesc("CV", iter = 2)
-lrn = makeTuneWrapper(lrn, resampling = inner, par.set = ps, control = ctrl,
-  show.info = FALSE)
-
-# Learners
-lrns = list("regr.nnet", lrn)
-
+# feature selection paramset for fusing
+ps = makeParamSet(makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))))
+# inner resamling loop
+# inner = makeResampleDesc("CV", iter = 7)
+inner = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
 # Outer resampling loop
-outer = makeResampleDesc("Subsample", iter = 3)
-res = benchmark(tasks = regr.task, learners = lrns, resampling = outer, show.info = FALSE)
-
-
-ps = makeParamSet(
-  makeDiscreteParam("size", values = c(1, 2, 5, 10, 30, 60, 70))
-)
-# grid search:
-ctrl = makeTuneControlGrid()
-# specify the learner
-lrn <- makeLearner("regr.nnet")
-# generate a tune wrapper:
-lrn <- makeTuneWrapper(lrn, measures = rmse, resampling = cv3, par.set = ps, control = makeTuneControlGrid(), show.info = FALSE)
-# generate a feat sel wrapper
-lrn = makeFeatSelWrapper(lrn,
-  measures = rmse,
-  resampling = cv3,
-  control = makeFeatSelControlSequential(method = "sbs"), show.info = FALSE)
-# perform resampling
-res <- resample(lrn, task = regr.task,  resampling = cv3, show.info = TRUE, models = TRUE)
-# res = benchmark(measures = rmse, tasks = regr.task, learners = lrns, resampling = outer, show.info = FALSE)
-
-rdesc = makeResampleDesc("LOO")
-res = tuneParams(measures = rmse, "regr.nnet", task = regr.task, resampling = rdesc,
-  par.set = ps, control = ctrl)
-res$x
-res$y
-lrn = setHyperPars(makeLearner("regr.nnet"), par.vals = res$x)
-# create the model
-m = train(lrn, regr.task)
-
-
-
-# Feature filtering with tuning in the inner resampling loop
-lrn = makeFilterWrapper(learner = "regr.lm", fw.method = "chi.squared")
-ps = makeParamSet(makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(bh.task))))
-ctrl = makeTuneControlGrid()
-inner = makeResampleDesc("CV", iter = 2)
-lrn = makeTuneWrapper(lrn, resampling = inner, par.set = ps, control = ctrl,
+# outer = makeResampleDesc("CV", inter = 2)
+outer = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
+# regr.lm learner features filtered and param tuned
+lrn.lm = makeFilterWrapper(learner = "regr.lm", fw.method = "chi.squared")
+lrn.lm = makeTuneWrapper(lrn.lm, resampling = inner, par.set = ps, control = ctrl,
   show.info = FALSE)
-
+# regr.glm
+lrn.glm = makeFilterWrapper(learner = "regr.glm", fw.method = "chi.squared")
+lrn.glm = makeTuneWrapper(lrn.glm, resampling = inner, par.set = ps, control = ctrl,
+  show.info = FALSE)
+# regr.fnn learner features filtered and param tuned
+lrn.fnn = makeFilterWrapper(learner = "regr.fnn", fw.method = "chi.squared")
+lrn.fnn = makeTuneWrapper(lrn.fnn, resampling = inner, par.set = ps, control = ctrl,
+  show.info = FALSE)
+# regr.kknn learner features filtered and param tuned
+lrn.kknn = makeFilterWrapper(learner = "regr.kknn", fw.method = "chi.squared")
+ps.kknn = makeParamSet(
+  makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))),
+  makeDiscreteParam("k", c(1,2,3,4,5))
+)
+lrn.kknn = makeTuneWrapper(lrn.kknn, resampling = inner, par.set = ps, control = ctrl,
+  show.info = FALSE)
+# nnet
+lrn.nnet = makeFilterWrapper(learner = "regr.nnet", fw.method = "chi.squared")
+ps.nnet = makeParamSet(
+  makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))),
+  makeDiscreteParam("size", c(1,2,5,10,20,50))
+)
+lrn.nnet = makeTuneWrapper(lrn.nnet, resampling = inner, par.set = ps.nnet, control = ctrl,
+  show.info = FALSE)
+# cubist
+lrn.cubist = makeFilterWrapper(learner = "regr.cubist", fw.method = "chi.squared")
+lrn.cubist = makeTuneWrapper(lrn.cubist, resampling = inner, par.set = ps, control = ctrl,
+  show.info = FALSE)
 # Learners
-lrns = list("regr.rpart", lrn)
-
-# Outer resampling loop
-outer = makeResampleDesc("Subsample", iter = 3)
+lrns = list("regr.lm", lrn.lm, lrn.nnet, lrn.fnn, lrn.kknn, lrn.cubist, lrn.glm)
+# outer = makeResampleDesc("Subsample", iter = 3)
 res = benchmark(measures = rmse, tasks = regr.task, learners = lrns, resampling = outer, show.info = FALSE)
+# nnet
+# lrn.nnet = makeLearner("regr.nnet")
+# ps.nnet = makeParamSet(
+#   makeDiscreteParam("size", c(1,5,10,20))
+# )
+# lrn.nnet <- makeTuneWrapper(lrn.nnet,
+#   resampling = cv3,
+#   par.set = ps.nnet,
+#   control = ctrl, show.info = FALSE)
+# lrn.nnet = makeFeatSelWrapper(lrn.nnet,
+#   resampling = cv3,
+#   control = makeFeatSelControlSequential(method = "sbs"), show.info = FALSE)
 
 # performances + best learner
 perfs = getBMRAggrPerformances(bmr = res, as.df = TRUE)
