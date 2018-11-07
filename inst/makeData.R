@@ -2,94 +2,48 @@
 library(dplyr)
 library(sf)
 # load the pre-existing datasets
-#devtools::install_github("pokyah/agrometVars")
+# devtools::install_github("pokyah/agrometVars")
 library(agrometeorVars)
-# installing new version of agrometAPi
+# installing new version of agrometAPI
 #devtools::install_github("pokyah/agrometAPI")
 library(agrometAPI)
+# installing custo mversion of mlr
+#devtools::install_github("pokyah/mlr", ref="gstat")
+library(mlr)
 library(leaflet)
 library(leaflet.extras)
 
-# Read data from the API exported json file downloaded from PAMESEB FTP & create a dataframe
-records = jsonlite::fromJSON(
-  "./inst/extdata/AGROMET/cleandataSensorstsa-ensForallFm2015-11-11To2018-06-30.json") # available on AGROMET FTP
-records.data = records$results
-records.meta = records$references$stations
-records.l <- list(metadata = records.meta, data = records.data)
-records.data <- agrometAPI::type_data(records.l, "cleandata")
+# loading the datasets from agrometeorVars package
+data("grid.sf")
+data("grid.static")
+data("grid.dyn")
 
-# Filtering records to keep only the useful ones (removing non relevant stations)
-records.data = records.data %>%
-  filter(network_name == "pameseb") %>%
-  filter(type_name != "Sencrop") %>%
-  filter(!is.na(to)) %>%
-  filter(state == "Ok") %>%
-  filter(!is.na(tsa)) %>%
-  filter(!is.na(ens))
+data("stations.sf")
+data("stations.static")
+data("stations.dyn")
 
-# keeping only sid for joining and the target var
-records.data = records.data %>%
-  dplyr::select(one_of(c("sid", "mtime", "tsa", "ens")))
-# removing temporary vars
-rm(records, records.l, records.meta)
-# getting only one hour dataset
-records.1h.data = records.data %>%
-  dplyr::filter(mtime == unique(records.data["mtime"])[1,])
+# creating the object where stations intersects the grid (to retrieve tsa_hp1)
+intersections =  stations.sf %>%
+  st_intersects(grid.sf)
 
-# Read the INCA spatial previsions exported data for November 2015.
-# data are stored in the df data.all
-load("./inst/extdata/INCABE/INCA_TT_201511.Rdata")
-inca.2015.11 = data.all
-rm(data.all)
+# definin
+# defining the function that will create
+# a regression task for onehour +
+# the newdata grid on which to predict
 
-# package agrometVars contains the location info of each INCA px id. Stored in inca object
-inca.sf = sf::st_as_sf(inca)
-# extracting inca coords as a df
-inca.coords = data.frame(sf::st_coordinates(inca.sf))
-# extracting px id as a df
-inca.px = data.frame(inca.sf$px)
-# making a dataframe
-inca.df = dplyr::bind_cols(inca.px, inca.coords)
-colnames(inca.df) = c("px", "X", "Y")
-# joining the locations attributes to the records
-inca.2015.11 = inca.2015.11 %>%
-  dplyr::left_join(inca.df, by = "px")
-# our records.1h.data = 2015-11-11 00:00 UTC. Let's filter inca with this
-inca.2015.11.11.1h = inca.2015.11 %>%
-  dplyr::filter(DAY == "20151111") %>%
-  dplyr::filter(HOUR == 0)
+make1htask = function(mtime){
+  stations.mtime = stations.dyn %>%
+    dplyr::filter(mtime == mtime) %>%
+    left_join(stations.sf, by = "sid") %>%
+    st_as_sf()
 
-# loading INCA prediction grid extraction
-data(inca.ext)
-class(inca.ext)
+  grid.mtime = grid.dyn %>%
+    dplyr::filter(mtime == mtime) %>%
+    left_join(grid.sf, by = "px") %>%
+    st_as_sf()
 
-# loading the stations extractions
-data(stations.ext)
-class(stations.ext)
+}
 
-# transforming geometry col to coords
-coords = data.frame(sf::st_coordinates(stations.ext))
-sf::st_geometry(stations.ext) = NULL
-stations.ext = stations.ext %>%
-  dplyr::bind_cols(coords)
-coords = data.frame(sf::st_coordinates(inca.ext))
-sf::st_geometry(inca.ext) = NULL
-inca.ext = inca.ext %>%
-  dplyr::bind_cols(coords)
-# keeping only useful cols
-stations.ext = stations.ext %>%
-  dplyr::select(one_of(c(
-    "sid", "altitude", "elevation", "slope", "aspect", "Agricultural_areas", "Herbaceous_vegetation", "Forest", "Artificials_surfaces", "X", "Y")))
-inca.ext = inca.ext %>%
-  dplyr::select(one_of(c(
-    "px", "elevation", "slope", "aspect", "Agricultural_areas", "Herbaceous_vegetation", "Forest", "Artificials_surfaces", "X", "Y"))) %>%
-  dplyr::select(-px)
-# joining the explanatory vars and the target vars and removing mtime + other non explanatory vars
-records.1h.data = records.1h.data %>%
-  dplyr::left_join(stations.ext, by = "sid") %>%
-  dplyr::select(-mtime) %>%
-  dplyr::select(-ens) %>%
-  dplyr::select(-altitude)
 # build the ML task and do not keep sid as it is not a var
 # devtools::install_github("pokyah/mlr", ref = "gstat")
 # https://www.sciencedirect.com/science/article/pii/S2211675315000482
@@ -111,10 +65,12 @@ ctrl = makeTuneControlGrid()
 ps = makeParamSet(makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))))
 # inner spatial resampling loop
 # inner = makeResampleDesc("CV", iter = 7)
-inner = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
+# inner = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
+inner = makeResampleDesc("LOO")
 # Outer resampling loop
 # outer = makeResampleDesc("CV", inter = 2)
-outer = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
+# outer = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
+outer = makeResampleDesc("LOO")
 # regr.lm learner features filtered with fw.abs param tuned
 lrn.lm = makeLearner("regr.lm", predict.type = 'se')
 lrn.lm = makeFilterWrapper(learner = lrn.lm, fw.method = "chi.squared")
@@ -150,12 +106,12 @@ ps.km = makeParamSet(
 lrn.km = makeTuneWrapper(measures = list(rmse, mse), lrn.km, resampling = inner, par.set = ps.km, control = ctrl,
   show.info = FALSE)
 # regr.gstat learner features filtered with fw.abs param tuned + k param also tuned
-lrn.gstat = makeFilterWrapper(learner = "regr.gstat", fw.method = "chi.squared")
-ps.gstat = makeParamSet(
-  makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task)))
-)
-lrn.gstat = makeTuneWrapper(measures = list(rmse, mse), lrn.gstat, resampling = inner, par.set = ps.gstat, control = ctrl,
-  show.info = FALSE)
+#lrn.gstat = makeFilterWrapper(learner = "regr.gstat", fw.method = "chi.squared")
+# ps.gstat = makeParamSet(
+#   makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task)))
+# )
+# lrn.gstat = makeTuneWrapper(measures = list(rmse, mse), lrn.gstat, resampling = inner, par.set = ps.gstat, control = ctrl,
+#   show.info = FALSE)
 # nnet learner features filtered with fw.abs param tuned + size param also tuned
 # lrn.nnet = makeFilterWrapper(learner = "regr.nnet", fw.method = "chi.squared")
 # ps.nnet = makeParamSet(
@@ -173,9 +129,9 @@ ps.cubist = makeParamSet(
 lrn.cubist = makeTuneWrapper(lrn.cubist, resampling = inner, par.set = ps.cubist, control = ctrl,
   show.info = FALSE)
 # Learners
-lrns = list(lrn.glm, lrn.fnn, lrn.blm)
+lrns = list(lrn.glm, lrn.lm, lrn.fnn)
 # outer = makeResampleDesc("Subsample", iter = 3)
-res = benchmark(measures = list(rmse, timetrain), tasks = regr.task, learners = lrns, resamplings = outer, show.info = FALSE)
+res = benchmark(measures = list(mae, mse, rmse, timetrain), tasks = regr.task, learners = lrns, resamplings = outer, show.info = FALSE)
 # nnet
 # lrn.nnet = makeLearner("regr.nnet")
 # ps.nnet = makeParamSet(
@@ -194,11 +150,11 @@ perfs = getBMRAggrPerformances(bmr = res, as.df = TRUE)
 best.learner = perfs %>%
     slice(which.min(rmse.test.rmse))
 # forcing the best learner
-best.learner = perfs %>%
-  dplyr::filter(learner.id == "regr.fnn.filtered.tuned")
-# making quick plots
-plotBMRBoxplots(bmr = res, measure = rmse, order.lrn = getBMRLearnerIds(res))
-plotBMRSummary(bmr = res)
+# best.learner = perfs %>%
+#   dplyr::filter(learner.id == "regr.fnn.filtered.tuned")
+# # making quick plots
+# plotBMRBoxplots(bmr = res, measure = rmse, order.lrn = getBMRLearnerIds(res))
+# plotBMRSummary(bmr = res)
 
 # training
 m = mlr::train(
@@ -312,7 +268,7 @@ leafletize <- function(data.sf, borders, stations){
   # if se.bool = TRUE
   if (!is.null(data.sf$se)) {
     uncPal <- leaflet::colorNumeric(
-      palette = alphaPal("#e6e6e6"),
+      palette = alphaPal("#5af602"),
       domain = data.sf$se,
       alpha = TRUE
     )

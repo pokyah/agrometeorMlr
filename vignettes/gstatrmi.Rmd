@@ -1,0 +1,6 @@
+range = 10 -> 200
+block = no
+nugget = 0
+nmax, nmin, = NA
+model= sph ou exp
+weights gstat function => https://github.com/pokyah/mlr/blob/gstat/R/RLearner_spatial_regr_gstat.R
