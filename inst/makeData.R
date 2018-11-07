@@ -110,7 +110,8 @@ make.bmr = function(data, dateTime, learners){
     tasks = task.dateTime,
     learners = learners,
     resamplings = outer,
-    show.info = FALSE
+    show.info = FALSE,
+    models = FALSE
   )
 
 }
@@ -173,123 +174,20 @@ lrn.gstat.ked = makeFilterWrapper(
 # learners in a list
 lrns = list(lrn.lm.alt_x_y, lrn.gstat.idw, lrn.gstat.ts1, lrn.gstat.ts2, lrn.gstat.ok, lrn.gstat.ked)
 
-hours = as.list(stations.dyn$mtime)
+# defining the list of hours on which we will perform the bmrs
+hours = head(as.list(stations.dyn$mtime), 240)
 
-bmrs = purrr::map(
-  .x = hours,
-  .f = make.bmr,
-  data = make.1h.data,
-  learners = lrns)
-
-
-
-
-
-
-test.bmr = make.bmr(data = test.1hdata, dateTime = test.dateTime, learners = lrns)
-test.bmr
-getBMRFilteredFeatures(test.bmr)
-
-
-
-
-regr.task = makeRegrTask(id = "1h", data = records, target = "tsa", coordinates = coordinates)
-# grid search for param tuning
-ctrl = makeTuneControlGrid()
-# absolute number feature selection paramset for fusing learner with the filter method
-ps = makeParamSet(makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))))
-# inner spatial resampling loop
-# inner = makeResampleDesc("CV", iter = 7)
-# inner = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
-inner = makeResampleDesc("LOO")
-# Outer resampling loop
-# outer = makeResampleDesc("CV", inter = 2)
-# outer = makeResampleDesc("SpRepCV", fold = 5, reps = 5)
-outer = makeResampleDesc("LOO")
-# regr.lm learner features filtered with fw.abs param tuned
-lrn.lm = makeLearner("regr.lm", predict.type = 'se')
-lrn.lm = makeFilterWrapper(learner = lrn.lm, fw.method = "chi.squared")
-lrn.lm = makeTuneWrapper(measures = list(rmse, mse), lrn.lm, resampling = inner, par.set = ps, control = ctrl,
-  show.info = FALSE)
-# regr.glm
-lrn.glm = makeLearner("regr.glm", predict.type = 'se')
-lrn.glm = makeFilterWrapper(learner = lrn.glm, fw.method = "chi.squared")
-lrn.glm = makeTuneWrapper(measures = list(rmse, mse), lrn.glm, resampling = inner, par.set = ps, control = ctrl,
-  show.info = FALSE)
-# regr.blm
-lrn.blm = makeLearner("regr.blm", predict.type = 'se')
-lrn.blm = makeFilterWrapper(learner = lrn.blm, fw.method = "chi.squared")
-lrn.blm = makeTuneWrapper(measures = list(rmse, mse), lrn.blm, resampling = inner, par.set = ps, control = ctrl,
-  show.info = FALSE)
-# regr.fnn learner features filtered with fw.abs param tuned
-lrn.fnn = makeFilterWrapper(learner = "regr.fnn", fw.method = "chi.squared")
-lrn.fnn = makeTuneWrapper(measures = list(rmse, mse), lrn.fnn, resampling = inner, par.set = ps, control = ctrl,
-  show.info = FALSE)
-# regr.kknn learner features filtered with fw.abs param tuned + k param also tuned
-lrn.kknn = makeFilterWrapper(learner = "regr.kknn", fw.method = "chi.squared")
-ps.kknn = makeParamSet(
-  makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))),
-  makeDiscreteParam("k", c(1,2,3,4,5))
+# performing the benchmarks
+bmrs = lapply(seq_along(hours), function(h)
+  make.bmr(data = make.1h.data(stations.dyn[h,]$mtime), dateTime = hours[[h]], learners = lrns)
 )
-lrn.kknn = makeTuneWrapper(measures = list(rmse, mse),lrn.kknn, resampling = inner, par.set = ps.kknn, control = ctrl,
-  show.info = FALSE)
-# regr.km learner features filtered with fw.abs param tuned + k param also tuned
-lrn.km = makeFilterWrapper(learner = "regr.km", fw.method = "chi.squared")
-ps.km = makeParamSet(
-  makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task)))
-)
-lrn.km = makeTuneWrapper(measures = list(rmse, mse), lrn.km, resampling = inner, par.set = ps.km, control = ctrl,
-  show.info = FALSE)
-# regr.gstat learner features filtered with fw.abs param tuned + k param also tuned
-#lrn.gstat = makeFilterWrapper(learner = "regr.gstat", fw.method = "chi.squared")
-# ps.gstat = makeParamSet(
-#   makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task)))
-# )
-# lrn.gstat = makeTuneWrapper(measures = list(rmse, mse), lrn.gstat, resampling = inner, par.set = ps.gstat, control = ctrl,
-#   show.info = FALSE)
-# nnet learner features filtered with fw.abs param tuned + size param also tuned
-# lrn.nnet = makeFilterWrapper(learner = "regr.nnet", fw.method = "chi.squared")
-# ps.nnet = makeParamSet(
-#   makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))),
-#   makeDiscreteParam("size", c(1,2,5,10,20,50,80))
-# )
-# lrn.nnet = makeTuneWrapper(lrn.nnet, resampling = inner, par.set = ps.nnet, control = ctrl,
-#   show.info = FALSE)
-# cubist learner features filtered with fw.abs param tuned + neighbors param also tuned
-lrn.cubist = makeFilterWrapper(learner = "regr.cubist", fw.method = "chi.squared")
-ps.cubist = makeParamSet(
-  makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(regr.task))),
-  makeDiscreteParam("neighbors", c(1,2,3,4,5))
-)
-lrn.cubist = makeTuneWrapper(lrn.cubist, resampling = inner, par.set = ps.cubist, control = ctrl,
-  show.info = FALSE)
-# Learners
-lrns = list(lrn.glm, lrn.lm, lrn.fnn)
-# outer = makeResampleDesc("Subsample", iter = 3)
-res = benchmark(measures = list(mae, mse, rmse, timetrain), tasks = regr.task, learners = lrns, resamplings = outer, show.info = FALSE)
-# nnet
-# lrn.nnet = makeLearner("regr.nnet")
-# ps.nnet = makeParamSet(
-#   makeDiscreteParam("size", c(1,5,10,20))
-# )
-# lrn.nnet <- makeTuneWrapper(lrn.nnet,
-#   resampling = cv3,
-#   par.set = ps.nnet,
-#   control = ctrl, show.info = FALSE)
-# lrn.nnet = makeFeatSelWrapper(lrn.nnet,
-#   resampling = cv3,
-#   control = makeFeatSelControlSequential(method = "sbs"), show.info = FALSE)
 
-# performances + best learner
-perfs = getBMRAggrPerformances(bmr = res, as.df = TRUE)
-best.learner = perfs %>%
-    slice(which.min(rmse.test.rmse))
-# forcing the best learner
-# best.learner = perfs %>%
-#   dplyr::filter(learner.id == "regr.fnn.filtered.tuned")
-# # making quick plots
-# plotBMRBoxplots(bmr = res, measure = rmse, order.lrn = getBMRLearnerIds(res))
-# plotBMRSummary(bmr = res)
+# merging all the benchmarks
+bmr = mergeBenchmarkResults(bmrs = bmrs)
+bmr.2 = data.frame(bmr) %>%
+  dplyr::group_by(learner.id) %>%
+  dplyr::summarise_all(.funs = mean) %>%
+  dplyr::arrange(rmse)
 
 # training
 m = mlr::train(
