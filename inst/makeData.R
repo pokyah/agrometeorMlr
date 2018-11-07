@@ -1,7 +1,15 @@
+# build the ML task and do not keep sid as it is not a var
+# devtools::install_github("pokyah/mlr", ref = "gstat")
+# https://www.sciencedirect.com/science/article/pii/S2211675315000482
+# https://stackoverflow.com/questions/40527442/r-mlr-wrapper-feature-selection-hyperparameter-tuning-without-nested-nested
+# https://github.com/mlr-org/mlr/issues/1861
+# https://mlr.mlr-org.com/articles/tutorial/handling_of_spatial_data.html
+# https://www.youtube.com/watch?v=LpOsxBeggM0
+
 # load the required libraries
 library(dplyr)
+# devtools::install_github("r-spatial/sf")
 library(sf)
-# load the pre-existing datasets
 # devtools::install_github("pokyah/agrometVars")
 library(agrometeorVars)
 # installing new version of agrometAPI
@@ -22,42 +30,169 @@ data("stations.sf")
 data("stations.static")
 data("stations.dyn")
 
-# creating the object where stations intersects the grid (to retrieve tsa_hp1)
-intersections =  stations.sf %>%
-  st_intersects(grid.sf)
+data("intersections")
 
-# definin
-# defining the function that will create
-# a regression task for onehour +
-# the newdata grid on which to predict
+# defining test.dateTime object for testing purpose
+test.dateTime = stations.dyn$mtime[2]
 
-make1htask = function(mtime){
+# defining the function that create a task for a specific hour (mtime)
+make.1h.data = function(dateTime){
+  # extracting the tsa_hp1 var at stations points for current mtime
   stations.mtime = stations.dyn %>%
-    dplyr::filter(mtime == mtime) %>%
-    left_join(stations.sf, by = "sid") %>%
-    st_as_sf()
+    # filtering for current time
+    dplyr::filter(mtime == dateTime) %>%
+    # adding corresponding grid px
+    dplyr::left_join(
+      data.frame(stations.sf)[c("sid", "px")],
+      by = "sid"
+    ) %>%
+    # adding tsa_hp1
+    dplyr::left_join(
+      (grid.dyn %>%
+          dplyr::filter(mtime == dateTime) %>%
+          dplyr::select(c("px", "tsa_hp1"))
+      ),
+      by = "px"
+    ) %>%
+    # adding static vars
+    dplyr::left_join(
+      stations.static,
+      by = "sid"
+    ) %>%
+    # removing useless px
+    dplyr::select(-px) %>%
+    # adding the lat and lon as projected Lambert 2008 (EPSG = 3812)
+    dplyr::left_join(
+      (data.frame(st_coordinates(st_transform(stations.sf, 3812))) %>%
+        dplyr::bind_cols(stations.sf["sid"]) %>%
+        dplyr::select(-geometry)
+      ),
+      by = "sid"
+    ) %>%
+    # removing mtime
+    dplyr::select(-mtime) %>%
+    # renaming X and Y to x and y
+    dplyr::rename(x = X) %>%
+    dplyr::rename(y = Y)
+}
 
-  grid.mtime = grid.dyn %>%
-    dplyr::filter(mtime == mtime) %>%
-    left_join(grid.sf, by = "px") %>%
-    st_as_sf()
+test.1hdata = make.1h.data(dateTime = test.dateTime)
+
+# defining the function that performs the benchmark
+make.bmr = function(data, dateTime, learners){
+  # make bmr reproducible
+  set.seed(2585)
+  # defining the task
+  task.dateTime = mlr::makeRegrTask(
+    id = as.character(dateTime),
+    data = data,
+    target = "tsa"
+  )
+  # ::FIXME:: coordinates ?
+  # removing ens for now
+  task.dateTime = dropFeatures(task.dateTime, "ens")
+
+  # grid search for param tuning
+  ctrl = makeTuneControlGrid()
+
+  # absolute number feature selection paramset for fusing learner with the filter method
+  ps = makeParamSet(makeDiscreteParam("fw.abs", values = seq_len(getTaskNFeats(task.dateTime))))
+
+  # inner resampling loop
+  inner = makeResampleDesc("LOO")
+
+  # outer resampling loop
+  outer = makeResampleDesc("LOO")
+
+  # benchmarking
+  res = benchmark(
+    measures = list(mae, mse, rmse, timetrain),
+    tasks = task.dateTime,
+    learners = learners,
+    resamplings = outer,
+    show.info = FALSE
+  )
 
 }
 
-# build the ML task and do not keep sid as it is not a var
-# devtools::install_github("pokyah/mlr", ref = "gstat")
-# https://www.sciencedirect.com/science/article/pii/S2211675315000482
-# https://stackoverflow.com/questions/40527442/r-mlr-wrapper-feature-selection-hyperparameter-tuning-without-nested-nested
-# https://github.com/mlr-org/mlr/issues/1861
-# https://mlr.mlr-org.com/articles/tutorial/handling_of_spatial_data.html
-# https://www.youtube.com/watch?v=LpOsxBeggM0
-set.seed(2585)
-library(mlr)
-records = records.1h.data[-1]
-coordinates = records %>%
-  dplyr::select(one_of(c("X","Y")))
-records = records %>%
-  dplyr::select(-one_of("X", "Y"))
+# defining the simple learners
+lrn.lm.alt_x_y = makeFilterWrapper(
+  learner = makeLearner(
+    cl = "regr.lm",
+    id = "multiReg.alt_x_y",
+    predict.type = 'se'),
+  fw.method = "linear.correlation",
+  fw.mandatory.feat = c("altitude", "y", "x"),
+  fw.abs = 3)
+
+lrn.gstat.idw = makeLearner(
+  cl = "regr.gstat",
+  id = "idw",
+  predict.type = "se")
+
+lrn.gstat.ts1 = makeLearner(
+  cl = "regr.gstat",
+  id = "ts1",
+  par.vals = list(degree = 1),
+  predict.type = "se")
+
+lrn.gstat.ts2 = makeLearner(
+  cl = "regr.gstat",
+  id = "ts2",
+  par.vals = list(degree = 2),
+  predict.type = "se")
+
+lrn.gstat.ok = makeFilterWrapper(
+  learner = makeLearner(
+    cl = "regr.gstat",
+    id = "ok",
+    par.vals = list(
+      range = 800,
+      psill = 2500,
+      model.manual = "Sph",
+      nugget = 0),
+    predict.type = "se"),
+  fw.method = "linear.correlation",
+  fw.mandatory.feat = c("y", "x"),
+  fw.abs = 2)
+
+lrn.gstat.ked = makeFilterWrapper(
+  learner = makeLearner(
+    cl = "regr.gstat",
+    id = "ked",
+    par.vals = list(
+      range = 800,
+      psill = 2500,
+      model.manual = "Sph",
+      nugget = 0),
+    predict.type = "se"),
+  fw.method = "linear.correlation",
+  fw.mandatory.feat = c("y", "x", "altitude"),
+  fw.abs = 3)
+
+# learners in a list
+lrns = list(lrn.lm.alt_x_y, lrn.gstat.idw, lrn.gstat.ts1, lrn.gstat.ts2, lrn.gstat.ok, lrn.gstat.ked)
+
+hours = as.list(stations.dyn$mtime)
+
+bmrs = purrr::map(
+  .x = hours,
+  .f = make.bmr,
+  data = make.1h.data,
+  learners = lrns)
+
+
+
+
+
+
+test.bmr = make.bmr(data = test.1hdata, dateTime = test.dateTime, learners = lrns)
+test.bmr
+getBMRFilteredFeatures(test.bmr)
+
+
+
+
 regr.task = makeRegrTask(id = "1h", data = records, target = "tsa", coordinates = coordinates)
 # grid search for param tuning
 ctrl = makeTuneControlGrid()
